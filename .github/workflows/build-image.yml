@@ -26,13 +26,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute Docker-safe branch tag
+        id: tag
+        run: |
+          # Docker tags can't contain '/', replace with '-'
+          safe_ref="${GITHUB_REF_NAME//\//-}"
+          echo "ref=$safe_ref" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/nwoyi/evo-ai-processor-community-1:${{ github.ref_name }}
+            ghcr.io/nwoyi/evo-ai-processor-community-1:${{ steps.tag.outputs.ref }}
             ghcr.io/nwoyi/evo-ai-processor-community-1:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
