@@ -61,9 +61,26 @@ class CustomToolBuilder:
         values = tool_config.get("values", {})
         error_handling = tool_config.get("error_handling", {})
 
-        path_params = parameters.get("path_params") or {}
-        query_params = parameters.get("query_params") or {}
-        body_params = parameters.get("body_params") or {}
+        # Read params from EITHER the legacy nested 'parameters' wrapper
+        # OR top-level keys (the shape EVO frontend writes today).
+        path_params = parameters.get("path_params") or tool_config.get("path_params") or {}
+        query_params = parameters.get("query_params") or tool_config.get("query_params") or {}
+        raw_body = parameters.get("body_params") or tool_config.get("body_params") or {}
+
+        # The EVO frontend stores body_params as a JSON Schema:
+        #   {"type": "object", "properties": {...}, "required": [...]}
+        # The loops below expect a flat {param_name: {"type", "description"}}.
+        # Detect schema shape, unwrap to .properties, remember required list.
+        body_required: List[str] = []
+        if (
+            isinstance(raw_body, dict)
+            and isinstance(raw_body.get("properties"), dict)
+            and (raw_body.get("type") == "object" or "required" in raw_body)
+        ):
+            body_required = list(raw_body.get("required") or [])
+            body_params = raw_body["properties"]
+        else:
+            body_params = raw_body
 
         def http_tool(**kwargs):
             try:
@@ -165,9 +182,13 @@ class CustomToolBuilder:
 
         # Adds body parameters
         for param, param_config in body_params.items():
-            required = "Required" if param_config.get("required", False) else "Optional"
+            is_required = (
+                param_config.get("required", False) or param in body_required
+            )
+            required = "Required" if is_required else "Optional"
             param_docs.append(
-                f"{param} ({param_config['type']}, {required}): {param_config['description']}"
+                f"{param} ({param_config.get('type', 'any')}, {required}): "
+                f"{param_config.get('description', '')}"
             )
 
         # Adds default values
