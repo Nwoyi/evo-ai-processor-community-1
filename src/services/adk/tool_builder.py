@@ -29,6 +29,7 @@
 
 from typing import Any, Dict, List
 from google.adk.tools import FunctionTool
+import inspect
 import requests
 import json
 import urllib.parse
@@ -54,12 +55,37 @@ class ToolBuilder:
         values = tool_config.get("values", {})
         error_handling = tool_config.get("error_handling", {})
 
-        path_params = parameters.get("path_params") or {}
-        query_params = parameters.get("query_params") or {}
-        body_params = parameters.get("body_params") or {}
+        path_params = (
+            parameters.get("path_params") or tool_config.get("path_params") or {}
+        )
+        query_params = (
+            parameters.get("query_params") or tool_config.get("query_params") or {}
+        )
+        raw_body = parameters.get("body_params") or tool_config.get("body_params") or {}
+
+        # The saved custom-tool UI stores body params as JSON Schema:
+        # {"type":"object","properties":{...},"required":[...]}.
+        # The HTTP wiring below expects a flat {param_name: config} map.
+        body_required: List[str] = []
+        if (
+            isinstance(raw_body, dict)
+            and isinstance(raw_body.get("properties"), dict)
+            and (raw_body.get("type") == "object" or "required" in raw_body)
+        ):
+            body_required = list(raw_body.get("required") or [])
+            body_params = raw_body["properties"]
+        else:
+            body_params = raw_body
 
         def http_tool(**kwargs):
             try:
+                logger.info(
+                    f"[custom-tool:{name}] kwargs_in={kwargs} "
+                    f"path_keys={list(path_params.keys())} "
+                    f"query_keys={list(query_params.keys())} "
+                    f"body_keys={list(body_params.keys())}"
+                )
+
                 # Combines default values with provided values
                 all_values = {**values, **kwargs}
 
@@ -125,6 +151,10 @@ class ToolBuilder:
                         request_body = []
 
                     # Makes the HTTP request with array body
+                    logger.info(
+                        f"[custom-tool:{name}] wire method={method} url={url} "
+                        f"query={query_params_dict} body={request_body}"
+                    )
                     response = requests.request(
                         method=method,
                         url=url,
@@ -150,6 +180,10 @@ class ToolBuilder:
                             body_data[param] = value
 
                     # Makes the HTTP request with object body
+                    logger.info(
+                        f"[custom-tool:{name}] wire method={method} url={url} "
+                        f"query={query_params_dict} body={body_data}"
+                    )
                     response = requests.request(
                         method=method,
                         url=url,
@@ -158,6 +192,10 @@ class ToolBuilder:
                         json=body_data if body_data else None,
                         timeout=error_handling.get("timeout", 30),
                     )
+
+                logger.info(
+                    f"[custom-tool:{name}] response status={response.status_code}"
+                )
 
                 if response.status_code >= 400:
                     raise requests.exceptions.HTTPError(
@@ -196,7 +234,11 @@ class ToolBuilder:
 
         # Adds body parameters
         for param, param_config in body_params.items():
-            required = "Required" if param_config.get("required", False) else "Optional"
+            required = (
+                "Required"
+                if param_config.get("required", False) or param in body_required
+                else "Optional"
+            )
             param_docs.append(
                 f"{param} ({param_config['type']}, {required}): {param_config['description']}"
             )
@@ -219,6 +261,42 @@ class ToolBuilder:
 
         # Defines the function name to be used by the ADK
         http_tool.__name__ = name
+
+        # ADK uses inspect.signature both for the declaration shown to the LLM
+        # and for filtering call args before invoking the function. A raw
+        # **kwargs signature makes real args disappear at runtime.
+        _type_map = {
+            "string": str,
+            "number": float,
+            "integer": int,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+        _seen_params: set = set()
+        _sig_params: list = []
+        for _src in (path_params, query_params, body_params):
+            if not isinstance(_src, dict):
+                continue
+            for _pname, _pcfg in _src.items():
+                if _pname in _seen_params:
+                    continue
+                _seen_params.add(_pname)
+                _ptype = (
+                    _type_map.get((_pcfg or {}).get("type"), str)
+                    if isinstance(_pcfg, dict)
+                    else str
+                )
+                _sig_params.append(
+                    inspect.Parameter(
+                        _pname,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        default=None,
+                        annotation=_ptype,
+                    )
+                )
+        if _sig_params:
+            http_tool.__signature__ = inspect.Signature(parameters=_sig_params)
 
         return FunctionTool(func=http_tool)
 
