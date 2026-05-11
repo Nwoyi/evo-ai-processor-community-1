@@ -30,6 +30,7 @@
 from typing import Any, Dict, List
 from google.adk.tools import FunctionTool
 from google.adk.tools.tool_context import ToolContext
+import inspect
 import requests
 import json
 import urllib.parse
@@ -209,6 +210,47 @@ class CustomToolBuilder:
 
         # Defines the function name to be used by the ADK
         http_tool.__name__ = name
+
+        # ADK introspects the function signature for two things:
+        #   (1) building the FunctionDeclaration the LLM sees
+        #   (2) filtering kwargs before invocation (run_async drops anything
+        #       not in inspect.signature(self.func).parameters)
+        # With **kwargs the only visible param is 'kwargs', so the LLM is told
+        # the tool takes a 'kwargs' arg AND every real arg is stripped at call
+        # time -> empty bodies on the wire. Override __signature__ so ADK sees
+        # the actual param names from path/query/body config.
+        _type_map = {
+            "string": str,
+            "number": float,
+            "integer": int,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+        _seen_params: set = set()
+        _sig_params: list = []
+        for _src in (path_params, query_params, body_params):
+            if not isinstance(_src, dict):
+                continue
+            for _pname, _pcfg in _src.items():
+                if _pname in _seen_params:
+                    continue
+                _seen_params.add(_pname)
+                _ptype = (
+                    _type_map.get((_pcfg or {}).get("type"), str)
+                    if isinstance(_pcfg, dict)
+                    else str
+                )
+                _sig_params.append(
+                    inspect.Parameter(
+                        _pname,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        default=None,
+                        annotation=_ptype,
+                    )
+                )
+        if _sig_params:
+            http_tool.__signature__ = inspect.Signature(parameters=_sig_params)
 
         return FunctionTool(func=http_tool)
 
