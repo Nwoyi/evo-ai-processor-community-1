@@ -85,6 +85,16 @@ class CustomToolBuilder:
 
         def http_tool(**kwargs):
             try:
+                # DIAG[custom-tool]: capture what ADK actually passes in.
+                # If this prints {} despite the LLM emitting args, either the
+                # signature override is being ignored at runtime (cache?) or
+                # ADK is filtering before we get here.
+                logger.info(
+                    f"[custom-tool:{name}] kwargs_in={kwargs} "
+                    f"path_keys={list(path_params.keys())} "
+                    f"query_keys={list(query_params.keys())} "
+                    f"body_keys={list(body_params.keys())}"
+                )
                 # Combines default values with provided values
                 all_values = {**values, **kwargs}
 
@@ -136,6 +146,13 @@ class CustomToolBuilder:
                     ):
                         body_data[param] = value
 
+                # DIAG[custom-tool]: log the actual wire payload right before
+                # the HTTP call. body_data here is what n8n will receive.
+                logger.info(
+                    f"[custom-tool:{name}] wire method={method} url={url} "
+                    f"query={query_params_dict} body={body_data}"
+                )
+
                 # Makes the HTTP request
                 response = requests.request(
                     method=method,
@@ -144,6 +161,12 @@ class CustomToolBuilder:
                     params=query_params_dict,
                     json=body_data if body_data else None,
                     timeout=error_handling.get("timeout", 30),
+                )
+
+                # DIAG[custom-tool]: log response status so we can correlate
+                # this run with the n8n execution in the n8n UI.
+                logger.info(
+                    f"[custom-tool:{name}] response status={response.status_code}"
                 )
 
                 if response.status_code >= 400:
